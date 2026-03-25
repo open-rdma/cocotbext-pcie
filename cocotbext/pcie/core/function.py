@@ -39,21 +39,23 @@ from .utils import PcieId
 
 class Function:
     """PCIe function, implements config TLP handling"""
+
     def __init__(self, *args, **kwargs):
         self._pcie_id = PcieId()
 
-        self.log = logging.getLogger(f"cocotb.pcie.{type(self).__name__}.{id(self)}")
+        self.log = logging.getLogger(
+            f"cocotb.pcie.{type(self).__name__}.{id(self)}")
         self.log.name = f"cocotb.pcie.{type(self).__name__}[{self._pcie_id}]"
 
         self.upstream_tx_handler = None
 
         self.current_tag = 0
-        self.tag_count = 256
-        self.tag_active = [False]*256
+        self.tag_count = 1024
+        self.tag_active = [False] * self.tag_count
         self.tag_release = Event()
 
-        self.rx_cpl_queues = [Queue() for k in range(256)]
-        self.rx_cpl_sync = [Event() for k in range(256)]
+        self.rx_cpl_queues = [Queue() for k in range(self.tag_count)]
+        self.rx_cpl_sync = [Event() for k in range(self.tag_count)]
 
         self.rx_tlp_handler = {}
 
@@ -110,8 +112,10 @@ class Function:
         # Interrupt pin
         self.interrupt_pin = 0
 
-        self.register_rx_tlp_handler(TlpType.CFG_READ_0, self.handle_config_0_read_tlp)
-        self.register_rx_tlp_handler(TlpType.CFG_WRITE_0, self.handle_config_0_write_tlp)
+        self.register_rx_tlp_handler(
+            TlpType.CFG_READ_0, self.handle_config_0_read_tlp)
+        self.register_rx_tlp_handler(
+            TlpType.CFG_WRITE_0, self.handle_config_0_write_tlp)
 
         self.pm_cap = PmCapability()
         self.register_capability(self.pm_cap)
@@ -193,6 +197,7 @@ class Function:
     |                                 |    Int Pin     |    Int Line    |  15   0x3C
     +---------------------------------+----------------+----------------+
     """
+
     async def read_config_register(self, reg):
         if reg == 0:
             # Vendor ID
@@ -379,7 +384,8 @@ class Function:
                     # 64 bit BAR
 
                     if bar >= len(self.bar):
-                        raise Exception("Final BAR marked as 64 bit, but no extension BAR available")
+                        raise Exception(
+                            "Final BAR marked as 64 bit, but no extension BAR available")
 
                     bar_val |= self.bar[bar] << 32
                     bar_mask |= self.bar_mask[bar] << 32
@@ -418,7 +424,8 @@ class Function:
         self.log.debug("Sending upstream TLP: %r", tlp)
         assert tlp.check()
         if self.parity_error_response_enable and tlp.ep:
-            self.log.warning("Sending poisoned TLP, reporting master data parity error")
+            self.log.warning(
+                "Sending poisoned TLP, reporting master data parity error")
             self.master_data_parity_error = True
         if self.upstream_tx_handler is None:
             raise Exception("Transmit handler not set")
@@ -426,7 +433,8 @@ class Function:
 
     async def send(self, tlp):
         if tlp.is_completion() and tlp.status == CplStatus.CA:
-            self.log.warning("Sending completion with CA status, reporting target abort")
+            self.log.warning(
+                "Sending completion with CA status, reporting target abort")
             self.signaled_target_abort = True
         await self.upstream_send(tlp)
 
@@ -435,13 +443,16 @@ class Function:
         assert tlp.check()
         if tlp.is_completion():
             if tlp.status == CplStatus.CA:
-                self.log.warning("Received completion with CA status, reporting target abort")
+                self.log.warning(
+                    "Received completion with CA status, reporting target abort")
                 self.received_target_abort = True
             elif tlp.status == CplStatus.UR:
-                self.log.warning("Received completion with UR status, reporting master abort")
+                self.log.warning(
+                    "Received completion with UR status, reporting master abort")
                 self.received_master_abort = True
         if self.parity_error_response_enable and tlp.ep:
-            self.log.warning("Received poisoned TLP, reporting master data parity error")
+            self.log.warning(
+                "Received poisoned TLP, reporting master data parity error")
             self.master_data_parity_error = True
         await self.handle_tlp(tlp)
 
@@ -485,7 +496,8 @@ class Function:
         return None
 
     async def alloc_tag(self):
-        tag_count = min(256 if self.pcie_cap.extended_tag_field_enable else 32, self.tag_count)
+        tag_count = min(
+            256 if self.pcie_cap.extended_tag_field_enable else 32, self.tag_count)
 
         while True:
             tag = self.current_tag
@@ -564,7 +576,8 @@ class Function:
             self.log.debug("Completion: %r", cpl)
             await self.upstream_send(cpl)
         else:
-            self.log.warning("Type 0 configuration read request device and function number mismatch: %r", tlp)
+            self.log.warning(
+                "Type 0 configuration read request device and function number mismatch: %r", tlp)
 
             # Unsupported request
             cpl = Tlp.create_ur_completion_for_tlp(tlp, self.pcie_id)
@@ -574,7 +587,7 @@ class Function:
     async def handle_config_0_write_tlp(self, tlp):
         if tlp.completer_id.device == self.device_num and tlp.completer_id.function == self.function_num:
             self.log.info("Config type 0 write, reg 0x%03x data 0x%08x",
-                tlp.address >> 2, struct.unpack('<L', tlp.get_data())[0])
+                          tlp.address >> 2, struct.unpack('<L', tlp.get_data())[0])
 
             # capture address information
             if self.bus_num != tlp.completer_id.bus:
@@ -592,7 +605,8 @@ class Function:
             self.log.debug("Completion: %r", cpl)
             await self.upstream_send(cpl)
         else:
-            self.log.warning("Type 0 configuration write request device and function number mismatch: %r", tlp)
+            self.log.warning(
+                "Type 0 configuration write request device and function number mismatch: %r", tlp)
 
             # Unsupported request
             cpl = Tlp.create_ur_completion_for_tlp(tlp, self.pcie_id)
