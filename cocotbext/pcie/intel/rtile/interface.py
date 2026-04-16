@@ -28,7 +28,9 @@ import struct
 import cocotb
 from cocotb.queue import Queue, QueueFull
 from cocotb.triggers import RisingEdge, Timer, First, Event
+from cocotb.types import Logic, LogicArray
 from cocotb_bus.bus import Bus
+from cocotb.handle import Immediate
 
 from cocotbext.pcie.core.tlp import Tlp
 
@@ -56,10 +58,12 @@ class RTileTxBus(BaseBus):
         # data transfer
         "data",
         "hdr",
+        "prefix", # unused
         "sop",
         "eop",
         "dvalid",
         "hvalid",
+        "pvalid", # unused
         "ready",
         # flow control
         "hcrdt_update",
@@ -78,10 +82,12 @@ class RTileRxBus(BaseBus):
     _signals = [
         "data",
         "hdr",
+        "prefix", # unused
         "sop",
         "eop",
         "dvalid",
         "hvalid",
+        "pvalid", # unused
         "ready",
         "empty",
         "bar",
@@ -95,35 +101,31 @@ class RTileRxBus(BaseBus):
         "dcrdt_init",
         "dcrdt_init_ack",
     ]
-    _optional_signals = ["data_par", "hdr_par",
-                         "prefix_par", "vfactive", "vfnum", "pfnum"]
+    _optional_signals = ["data_par", "hdr_par", "prefix_par",
+                            "vfactive", "vfnum", "pfnum",
+                            "pt_par"]
 
 
 def dword_parity(d):
+    d ^= d >> 16
+    d ^= d >> 8
     d ^= d >> 4
     d ^= d >> 2
     d ^= d >> 1
     p = d & 0x1
-    if d & 0x100:
-        p |= 0x2
-    if d & 0x10000:
-        p |= 0x4
-    if d & 0x1000000:
-        p |= 0x8
     return p
 
-
 def parity(d):
+    d ^= d >> 16
+    d ^= d >> 8
     d ^= d >> 4
     d ^= d >> 2
     d ^= d >> 1
-    b = 0x1
+
     p = 0
-    while d:
-        if d & 0x1:
-            p |= b
-        d >>= 8
-        b <<= 1
+    for k in range(4):
+        if d & (1 << (32*k)):
+            p |= 1 << k
     return p
 
 
@@ -177,13 +179,13 @@ class RTilePcieFrame:
         return tlp
 
     def update_parity(self):
-        self.parity = [dword_parity(d) ^ 0xf for d in self.data]
+        self.parity = [dword_parity(d) ^ 0x1 for d in self.data]
         self.hdr_par = parity(self.hdr)
         # self.tlp_prfx_par = dword_parity(self.tlp_prfx)
 
     def check_parity(self):
         return (
-            self.parity == [dword_parity(d) ^ 0xf for d in self.data] and
+            self.parity == [dword_parity(d) ^ 0x1 for d in self.data] and
             self.hdr_par == parity(self.hdr)
             # self.tlp_prfx_par == dword_parity(self.tlp_prfx)
         )
@@ -207,6 +209,7 @@ class RTilePcieFrame:
 
     def __repr__(self):
         return (
+            f"{type(self).__name__}("
             # f"{type(self).__name__}(tlp_prfx={self.tlp_prfx:#010x}, hdr={self.hdr:#034x}, "
             f"data=[{', '.join(f'{x:#010x}' for x in self.data)}], "
             # f"tlp_prfx_par={self.tlp_prfx_par:#x}, hdr_par={self.hdr_par:#06x}, "
@@ -236,6 +239,20 @@ class RTilePcieTransaction:
                 setattr(self, sig, 0)
 
         super().__init__(*args, **kwargs)
+
+    def __setattr__(self, name, value):
+        if name not in self.__slots__:
+            raise AttributeError(f"{type(self).__name__!s} has no attribute {name!r}")
+
+        if isinstance(value, Logic):
+            value = int(value)
+        elif isinstance(value, LogicArray):
+            value = value.to_unsigned()
+
+        object.__setattr__(self, name, value)
+
+    def _on_slot_set(self, name, value, old_value):
+        return value
 
     def __repr__(self):
         return f"{type(self).__name__}({', '.join(f'{s}={hex(getattr(self, s))}' for s in self.__slots__)})"
@@ -286,7 +303,7 @@ class RTilePcieBase:
         self.seg_count = len(self.bus.dvalid)
         self.seg_width = self.width // self.seg_count
         self.seg_mask = 2**self.seg_width-1
-        self.seg_par_width = self.seg_width // 8
+        self.seg_par_width = self.seg_width // 32
         self.seg_par_mask = 2**self.seg_par_width-1
         self.seg_byte_lanes = self.byte_lanes // self.seg_count
         self.seg_empty_width = (self.seg_byte_lanes-1).bit_length()
@@ -321,11 +338,13 @@ class RTilePcieBase:
             assert len(self.bus.vfnum) == self.seg_count*11
 
         if hasattr(self.bus, "data_par"):
-            assert len(self.bus.data_par) == self.seg_count*self.seg_width//8
+            assert len(self.bus.data_par) == self.seg_count*8
         if hasattr(self.bus, "hdr_par"):
-            assert len(self.bus.hdr_par) == self.seg_count*128//8
+            # assert len(self.bus.hdr_par) == self.seg_count*128//8
+            assert len(self.bus.hdr_par) == self.seg_count*4
         if hasattr(self.bus, "prefix_par"):
-            assert len(self.bus.prefix_par) == self.seg_count*32//8
+            # assert len(self.bus.prefix_par) == self.seg_count*32//8
+            assert len(self.bus.prefix_par) == self.seg_count
 
     def count(self):
         return self.queue.qsize()
@@ -385,38 +404,38 @@ class RTilePcieSource(RTilePcieBase):
         self.queue_occupancy_limit_bytes = -1
         self.queue_occupancy_limit_frames = -1
 
-        self.bus.data.setimmediatevalue(0)
-        self.bus.sop.setimmediatevalue(0)
-        self.bus.eop.setimmediatevalue(0)
+        self.bus.data.value = Immediate(0)
+        self.bus.sop.value = Immediate(0)
+        self.bus.eop.value = Immediate(0)
         # self.bus.pvalid.setimmediatevalue(0)
-        self.bus.hvalid.setimmediatevalue(0)
-        self.bus.dvalid.setimmediatevalue(0)
-        self.bus.hdr.setimmediatevalue(0)
+        self.bus.hvalid.value = Immediate(0)
+        self.bus.dvalid.value = Immediate(0)
+        self.bus.hdr.value = Immediate(0)
         # self.bus.tlp_prfx.setimmediatevalue(0)
 
         if hasattr(self.bus, "empty"):
-            self.bus.empty.setimmediatevalue(0)
+            self.bus.empty.value = Immediate(0)
 
         if hasattr(self.bus, "err"):
-            self.bus.err.setimmediatevalue(0)
+            self.bus.err.value = Immediate(0)
         if hasattr(self.bus, "bar"):
-            self.bus.bar.setimmediatevalue(0)
+            self.bus.bar.value = Immediate(0)
         # if hasattr(self.bus, "tlp_abort"):
         #     self.bus.tlp_abort.setimmediatevalue(0)
 
         if hasattr(self.bus, "vfactive"):
-            self.bus.vfactive.setimmediatevalue(0)
+            self.bus.vfactive.value = Immediate(0)
         if hasattr(self.bus, "pfnum"):
-            self.bus.pfnum.setimmediatevalue(0)
+            self.bus.pfnum.value = Immediate(0)
         if hasattr(self.bus, "vfnum"):
-            self.bus.vfnum.setimmediatevalue(0)
+            self.bus.vfnum.value = Immediate(0)
 
         if hasattr(self.bus, "data_par"):
-            self.bus.data_par.setimmediatevalue(0)
+            self.bus.data_par.value = Immediate(0)
         if hasattr(self.bus, "hdr_par"):
-            self.bus.hdr_par.setimmediatevalue(0)
+            self.bus.hdr_par.value = Immediate(0)
         if hasattr(self.bus, "prefix_par"):
-            self.bus.prefix_par.setimmediatevalue(0)
+            self.bus.prefix_par.value = Immediate(0)
 
         cocotb.start_soon(self._run_source())
         cocotb.start_soon(self._run())
@@ -531,7 +550,7 @@ class RTilePcieSource(RTilePcieBase):
                         transaction.sop |= 1 << seg
                         transaction.hdr |= frame.hdr << seg*128
                         # transaction.tlp_prfx |= frame.tlp_prfx << seg*32
-                        transaction.hdr_par |= frame.hdr_par << seg*16
+                        transaction.hdr_par |= frame.hdr_par << seg*4
                         # transaction.tlp_prfx_par |= frame.tlp_prfx_par << seg*4
 
                     transaction.bar |= frame.bar << seg*3
@@ -548,7 +567,7 @@ class RTilePcieSource(RTilePcieBase):
                         for k in range(min(self.seg_byte_lanes, len(frame.data)-frame_offset)):
                             transaction.data |= frame.data[frame_offset] << 32*(
                                 k+seg*self.seg_byte_lanes)
-                            transaction.data_par |= frame.parity[frame_offset] << 4*(
+                            transaction.data_par |= frame.parity[frame_offset] << (
                                 k+seg*self.seg_byte_lanes)
                             empty = self.seg_byte_lanes-1-k
                             frame_offset += 1
@@ -597,7 +616,7 @@ class RTilePcieSink(RTilePcieBase):
         self.queue_occupancy_limit_bytes = -1
         self.queue_occupancy_limit_frames = -1
 
-        self.bus.ready.setimmediatevalue(0)
+        self.bus.ready.value = 0
 
         cocotb.start_soon(self._run_sink())
         cocotb.start_soon(self._run())
@@ -699,7 +718,7 @@ class RTilePcieSink(RTilePcieBase):
                     # frame.tlp_prfx = (sample.tlp_prfx >> (seg*32)) & 0xffffffff
                     # frame.tlp_prfx_par = (sample.tlp_prfx_par >> (seg*4)) & 0xf
                     frame.hdr = (sample.hdr >> (seg*128)) & (2**128-1)
-                    frame.hdr_par = (sample.hdr_par >> (seg*16)) & 0xffff
+                    frame.hdr_par = (sample.hdr_par >> (seg*4)) & 0xf
                     if frame.hdr & (1 << 126):
                         dword_count = (frame.hdr >> 96) & 0x3ff
                         if dword_count == 0:
@@ -707,10 +726,10 @@ class RTilePcieSink(RTilePcieBase):
                     else:
                         dword_count = 0
 
-                    if (frame.hdr >> 124) & 0b101 in [0b001, 0b000]:
-                        requester_id_mask = (0xFFFF << 80)
-                        frame.hdr &= ~requester_id_mask
-                        frame.hdr |= self.bdf << 80
+                    # if (frame.hdr >> 124) & 0b101 in [0b001, 0b000]:
+                    #     requester_id_mask = (0xFFFF << 80)
+                    #     frame.hdr &= ~requester_id_mask
+                    #     frame.hdr |= self.bdf << 80
 
                     frame.bar = (sample.bar >> seg*3) & 0x7
                     frame.pfnum = (sample.pfnum >> seg*3) & 0x7
@@ -726,7 +745,7 @@ class RTilePcieSink(RTilePcieBase):
                         seg*self.seg_par_width)) & self.seg_par_mask
                     for k in range(min(self.seg_byte_lanes, dword_count)):
                         frame.data.append((data >> 32*k) & 0xffffffff)
-                        frame.parity.append((data_par >> 4*k) & 0xf)
+                        frame.parity.append((data_par >> k) & 0x1)
                         dword_count -= 1
 
                 if sample.eop & (1 << seg):

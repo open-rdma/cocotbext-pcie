@@ -1,6 +1,6 @@
 """
 
-Copyright (c) 2022 Alex Forencich
+Copyright (c) 2022-2025 Alex Forencich
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -27,7 +27,8 @@ import struct
 
 import cocotb
 from cocotb.queue import Queue, QueueFull
-from cocotb.triggers import RisingEdge, Timer, First, Event
+from cocotb.triggers import RisingEdge, Timer, First, Event, ReadWrite
+from cocotb.handle import Immediate
 from cocotb_bus.bus import Bus
 
 from cocotbext.pcie.core.tlp import Tlp
@@ -343,36 +344,36 @@ class PTilePcieSource(PTilePcieBase):
         self.queue_occupancy_limit_bytes = -1
         self.queue_occupancy_limit_frames = -1
 
-        self.bus.data.setimmediatevalue(0)
-        self.bus.sop.setimmediatevalue(0)
-        self.bus.eop.setimmediatevalue(0)
-        self.bus.valid.setimmediatevalue(0)
-        self.bus.hdr.setimmediatevalue(0)
-        self.bus.tlp_prfx.setimmediatevalue(0)
+        self.bus.data.value = 0
+        self.bus.sop.value = 0
+        self.bus.eop.value = 0
+        self.bus.valid.value = 0
+        self.bus.hdr.value = 0
+        self.bus.tlp_prfx.value = 0
 
         if hasattr(self.bus, "empty"):
-            self.bus.empty.setimmediatevalue(0)
+            self.bus.empty.value = 0
 
         if hasattr(self.bus, "err"):
-            self.bus.err.setimmediatevalue(0)
+            self.bus.err.value = 0
         if hasattr(self.bus, "bar_range"):
-            self.bus.bar_range.setimmediatevalue(0)
+            self.bus.bar_range.value = 0
         if hasattr(self.bus, "tlp_abort"):
-            self.bus.tlp_abort.setimmediatevalue(0)
+            self.bus.tlp_abort.value = 0
 
         if hasattr(self.bus, "vf_active"):
-            self.bus.vf_active.setimmediatevalue(0)
+            self.bus.vf_active.value = 0
         if hasattr(self.bus, "func_num"):
-            self.bus.func_num.setimmediatevalue(0)
+            self.bus.func_num.value = 0
         if hasattr(self.bus, "vf_num"):
-            self.bus.vf_num.setimmediatevalue(0)
+            self.bus.vf_num.value = 0
 
         if hasattr(self.bus, "data_par"):
-            self.bus.data_par.setimmediatevalue(0)
+            self.bus.data_par.value = 0
         if hasattr(self.bus, "hdr_par"):
-            self.bus.hdr_par.setimmediatevalue(0)
+            self.bus.hdr_par.value = 0
         if hasattr(self.bus, "tlp_prfx_par"):
-            self.bus.tlp_prfx_par.setimmediatevalue(0)
+            self.bus.tlp_prfx_par.value = 0
 
         cocotb.start_soon(self._run_source())
         cocotb.start_soon(self._run())
@@ -543,7 +544,7 @@ class PTilePcieSink(PTilePcieBase):
         self.queue_occupancy_limit_bytes = -1
         self.queue_occupancy_limit_frames = -1
 
-        self.bus.ready.setimmediatevalue(0)
+        self.bus.ready.value = 0
 
         cocotb.start_soon(self._run_sink())
         cocotb.start_soon(self._run())
@@ -629,17 +630,17 @@ class PTilePcieSink(PTilePcieBase):
             self.sample_obj = None
 
             for seg in range(self.seg_count):
-                if not sample.valid & (1 << seg):
+                if not int(sample.valid) & (1 << seg):
                     continue
 
-                if sample.sop & (1 << seg):
+                if int(sample.sop) & (1 << seg):
                     assert frame is None, "framing error: sop asserted in frame"
                     frame = PTilePcieFrame()
 
-                    frame.tlp_prfx = (sample.tlp_prfx >> (seg*32)) & 0xffffffff
-                    frame.tlp_prfx_par = (sample.tlp_prfx_par >> (seg*4)) & 0xf
-                    frame.hdr = (sample.hdr >> (seg*128)) & (2**128-1)
-                    frame.hdr_par = (sample.hdr_par >> (seg*16)) & 0xffff
+                    frame.tlp_prfx = (int(sample.tlp_prfx) >> (seg*32)) & 0xffffffff
+                    frame.tlp_prfx_par = (int(sample.tlp_prfx_par) >> (seg*4)) & 0xf
+                    frame.hdr = (int(sample.hdr) >> (seg*128)) & (2**128-1)
+                    frame.hdr_par = (int(sample.hdr_par) >> (seg*16)) & 0xffff
                     if frame.hdr & (1 << 126):
                         dword_count = (frame.hdr >> 96) & 0x3ff
                         if dword_count == 0:
@@ -647,23 +648,23 @@ class PTilePcieSink(PTilePcieBase):
                     else:
                         dword_count = 0
 
-                    frame.bar_range = (sample.bar_range >> seg*3) & 0x7
-                    frame.func_num = (sample.func_num >> seg*3) & 0x7
-                    if sample.vf_active & (1 << seg):
-                        frame.vf_num = (sample.vf_num >> seg*11) & 0x7ff
-                    frame.err = (sample.err >> seg) & 0x1
+                    frame.bar_range = (int(sample.bar_range) >> seg*3) & 0x7
+                    frame.func_num = (int(sample.func_num) >> seg*3) & 0x7
+                    if int(sample.vf_active) & (1 << seg):
+                        frame.vf_num = (int(sample.vf_num) >> seg*11) & 0x7ff
+                    frame.err = (int(sample.err) >> seg) & 0x1
 
                 assert frame is not None, "framing error: data transferred outside of frame"
 
                 if dword_count > 0:
-                    data = (sample.data >> (seg*self.seg_width)) & self.seg_mask
-                    data_par = (sample.data_par >> (seg*self.seg_par_width)) & self.seg_par_mask
+                    data = (int(sample.data) >> (seg*self.seg_width)) & self.seg_mask
+                    data_par = (int(sample.data_par) >> (seg*self.seg_par_width)) & self.seg_par_mask
                     for k in range(min(self.seg_byte_lanes, dword_count)):
                         frame.data.append((data >> 32*k) & 0xffffffff)
                         frame.parity.append((data_par >> 4*k) & 0xf)
                         dword_count -= 1
 
-                if sample.eop & (1 << seg):
+                if int(sample.eop) & (1 << seg):
                     assert dword_count == 0, "framing error: incorrect length or early eop"
                     self.log.info("RX frame: %r", frame)
                     self._sink_frame(frame)

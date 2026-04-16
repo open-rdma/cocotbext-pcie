@@ -1,6 +1,6 @@
 /*
 
-Copyright (c) 2020 Alex Forencich
+Copyright (c) 2020-2025 Alex Forencich
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -47,7 +47,7 @@ module test_pcie_usp #
     input  [DATA_WIDTH-1:0]     s_axis_rq_tdata,
     input  [KEEP_WIDTH-1:0]     s_axis_rq_tkeep,
     input                       s_axis_rq_tlast,
-    output [3:0]                s_axis_rq_tready,
+    output                      s_axis_rq_tready,
     input  [RQ_USER_WIDTH-1:0]  s_axis_rq_tuser,
     input                       s_axis_rq_tvalid,
     output [DATA_WIDTH-1:0]     m_axis_rc_tdata,
@@ -65,7 +65,7 @@ module test_pcie_usp #
     input  [DATA_WIDTH-1:0]     s_axis_cc_tdata,
     input  [KEEP_WIDTH-1:0]     s_axis_cc_tkeep,
     input                       s_axis_cc_tlast,
-    output [3:0]                s_axis_cc_tready,
+    output                      s_axis_cc_tready,
     input  [CC_USER_WIDTH-1:0]  s_axis_cc_tuser,
     input                       s_axis_cc_tvalid,
     output [5:0]                pcie_rq_seq_num0,

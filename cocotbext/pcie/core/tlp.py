@@ -1,6 +1,6 @@
 """
 
-Copyright (c) 2020 Alex Forencich
+Copyright (c) 2020-2025 Alex Forencich
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -264,6 +264,15 @@ class Tlp:
     @requester_id.setter
     def requester_id(self, val):
         self._requester_id = PcieId(val)
+
+    # alias for backwards compatibility
+    @property
+    def dest_id(self):
+        return self._completer_id
+
+    @dest_id.setter
+    def dest_id(self, val):
+        self._completer_id = PcieId(val)
 
     def check(self):
         """Validate TLP"""

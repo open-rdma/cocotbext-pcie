@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """
 
-Copyright (c) 2021 Alex Forencich
+Copyright (c) 2021-2025 Alex Forencich
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -707,9 +707,14 @@ class TB:
         while True:
             await RisingEdge(self.dut.coreclkout_hip)
 
-            if self.dut.tl_cfg_func.value.integer == 0:
-                addr = self.dut.tl_cfg_add.value.integer
-                ctl = self.dut.tl_cfg_ctl.value.integer
+            try:
+                func = int(self.dut.tl_cfg_func.value)
+                addr = int(self.dut.tl_cfg_add.value)
+                ctl = int(self.dut.tl_cfg_ctl.value)
+            except ValueError:
+                continue
+
+            if func == 0:
                 if addr == 0x00:
                     self.dev_max_payload = ctl & 0x7
                     self.dev_max_read_req = (ctl >> 3) & 0x7
@@ -865,7 +870,7 @@ async def run_test_msi(dut, idle_inserter=None, backpressure_inserter=None):
         dut.app_msi_num.value = k
         dut.app_msi_func_num.value = 0
 
-        while not dut.app_msi_ack.value.integer:
+        while not int(dut.app_msi_ack.value):
             await RisingEdge(dut.coreclkout_hip)
 
         dut.app_msi_req.value = 0
@@ -919,7 +924,7 @@ def cycle_pause():
     return itertools.cycle([1, 1, 1, 0])
 
 
-if cocotb.SIM_NAME:
+if getattr(cocotb, 'top', None) is not None:
 
     for test in [
                 run_test_mem,

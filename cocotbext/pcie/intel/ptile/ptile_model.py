@@ -1,6 +1,6 @@
 """
 
-Copyright (c) 2022 Alex Forencich
+Copyright (c) 2022-2025 Alex Forencich
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -26,6 +26,7 @@ import cocotb
 from cocotb.clock import Clock
 from cocotb.queue import Queue
 from cocotb.triggers import RisingEdge, FallingEdge, Timer, First
+from cocotb.handle import Immediate
 
 from cocotbext.pcie.core import Device, Endpoint, __version__
 from cocotbext.pcie.core.caps import MsiCapability, MsixCapability
@@ -116,7 +117,7 @@ def init_signal(sig, width=None, initval=None):
     if width is not None:
         assert len(sig) == width
     if initval is not None:
-        sig.setimmediatevalue(initval)
+        sig.set(Immediate(initval))
     return sig
 
 
@@ -321,7 +322,7 @@ class PTilePcieDevice(Device):
 
         self.log.info("Intel P-tile PCIe hard IP core model")
         self.log.info("cocotbext-pcie version %s", __version__)
-        self.log.info("Copyright (c) 2022 Alex Forencich")
+        self.log.info("Copyright (c) 2022-2025 Alex Forencich")
         self.log.info("https://github.com/alexforencich/cocotbext-pcie")
 
         self.default_function = PTilePcieFunction
@@ -741,15 +742,15 @@ class PTilePcieDevice(Device):
         # fork coroutines
 
         if self.coreclkout_hip is not None:
-            cocotb.start_soon(Clock(self.coreclkout_hip, int(1e9/self.pld_clk_frequency), units="ns").start())
+            cocotb.start_soon(Clock(self.coreclkout_hip, int(1e9/self.pld_clk_frequency), unit="ns").start())
 
-        if self.rx_source:
+        if self.rx_source is not None:
             cocotb.start_soon(self._run_rx_logic())
-        if self.tx_sink:
+        if self.tx_sink is not None:
             cocotb.start_soon(self._run_tx_logic())
-        if self.tx_cdts_limit:
+        if self.tx_cdts_limit is not None:
             cocotb.start_soon(self._run_tx_fc_logic())
-        if self.tl_cfg_ctl:
+        if self.tl_cfg_ctl is not None:
             cocotb.start_soon(self._run_cfg_out_logic())
 
         cocotb.start_soon(self._run_reset())

@@ -1,6 +1,6 @@
 """
 
-Copyright (c) 2021 Alex Forencich
+Copyright (c) 2021-2025 Alex Forencich
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -81,7 +81,7 @@ class MemoryTlpRegion(Region):
             addr += byte_length
 
         for byte_length, op in op_list:
-            cpl_list = await op.join()
+            cpl_list = await op
 
             m = 0
 
@@ -180,7 +180,7 @@ class IoTlpRegion(Region):
             addr += byte_length
 
         for first_pad, op in op_list:
-            cpl_list = await op.join()
+            cpl_list = await op
 
             if not cpl_list:
                 raise Exception("Timeout")
@@ -228,7 +228,7 @@ class IoTlpRegion(Region):
             addr += byte_length
 
         for op in op_list:
-            cpl_list = await op.join()
+            cpl_list = await op
 
             if not cpl_list:
                 raise Exception("Timeout")

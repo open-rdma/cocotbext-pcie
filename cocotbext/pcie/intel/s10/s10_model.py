@@ -1,6 +1,6 @@
 """
 
-Copyright (c) 2021 Alex Forencich
+Copyright (c) 2021-2025 Alex Forencich
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -246,7 +246,7 @@ class S10PcieDevice(Device):
 
         self.log.info("Intel Stratix 10 H-Tile/L-Tile PCIe hard IP core model")
         self.log.info("cocotbext-pcie version %s", __version__)
-        self.log.info("Copyright (c) 2021 Alex Forencich")
+        self.log.info("Copyright (c) 2021-2025 Alex Forencich")
         self.log.info("https://github.com/alexforencich/cocotbext-pcie")
 
         self.default_function = S10PcieFunction
@@ -592,15 +592,15 @@ class S10PcieDevice(Device):
         if self.coreclkout_hip is not None:
             cocotb.start_soon(Clock(self.coreclkout_hip, int(1e9/self.pld_clk_frequency), units="ns").start())
 
-        if self.rx_source:
+        if self.rx_source is not None:
             cocotb.start_soon(self._run_rx_logic())
-        if self.tx_sink:
+        if self.tx_sink is not None:
             cocotb.start_soon(self._run_tx_logic())
-        if self.tx_pd_cdts:
+        if self.tx_pd_cdts is not None:
             cocotb.start_soon(self._run_tx_fc_logic())
-        if self.app_msi_req:
+        if self.app_msi_req is not None:
             cocotb.start_soon(self._run_int_logic())
-        if self.tl_cfg_ctl:
+        if self.tl_cfg_ctl is not None:
             if self.l_tile:
                 cocotb.start_soon(self._run_cfg_out_logic_ltile())
             else:
@@ -827,21 +827,21 @@ class S10PcieDevice(Device):
             await clock_edge_event
 
             # Interrupt interface
-            while not self.app_msi_req.value.integer:
+            while not int(self.app_msi_req.value):
                 await RisingEdge(self.app_msi_req)
                 await clock_edge_event
 
             # issue MSI interrupt
-            app_msi_func_num = self.app_msi_func_num.value.integer
-            app_msi_num = self.app_msi_num.value.integer
-            app_msi_tc = self.app_msi_tc.value.integer
+            app_msi_func_num = int(self.app_msi_func_num.value)
+            app_msi_num = int(self.app_msi_num.value)
+            app_msi_tc = int(self.app_msi_tc.value)
             await self.functions[app_msi_func_num].msi_cap.issue_msi_interrupt(app_msi_num, tc=app_msi_tc)
 
             self.app_msi_ack.value = 1
             await clock_edge_event
             self.app_msi_ack.value = 0
 
-            while self.app_msi_req.value.integer:
+            while int(self.app_msi_req.value):
                 await clock_edge_event
 
     # Error interface

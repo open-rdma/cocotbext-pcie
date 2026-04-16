@@ -29,6 +29,7 @@ from cocotbext.pcie.core.utils import PcieId
 from cocotbext.pcie.core.caps import AerExtendedCapability, PcieExtendedCapability
 from cocotbext.pcie.core.caps import MsiCapability, MsixCapability
 from cocotbext.pcie.core import Device, Endpoint, __version__
+from cocotb.handle import Immediate
 from cocotb.triggers import Event, RisingEdge, FallingEdge, Timer, First
 from cocotb.queue import Queue
 from cocotb.clock import Clock
@@ -117,7 +118,7 @@ def init_signal(sig, width=None, initval=None):
     if width is not None:
         assert len(sig) == width
     if initval is not None:
-        sig.setimmediatevalue(initval)
+        sig.set(Immediate(initval))
     return sig
 
 
@@ -779,13 +780,13 @@ class RTilePcieDevice(Device):
 
         if self.coreclkout_hip is not None:
             cocotb.start_soon(Clock(self.coreclkout_hip, int(
-                1e9/self.pld_clk_frequency), units="ns").start())
+                1e9/self.pld_clk_frequency), unit="ns").start())
 
         if self.rx_source:
             cocotb.start_soon(self._run_rx_logic())
         if self.tx_sink:
             cocotb.start_soon(self._run_tx_logic())
-        if self.tl_cfg_ctl:
+        if self.tl_cfg_ctl is not None:
             cocotb.start_soon(self._run_cfg_out_logic())
 
         cocotb.start_soon(self._run_reset())
@@ -1295,6 +1296,26 @@ class RTilePcieDevice(Device):
     # virtio_pcicfg_rdbe
     # virtio_pcicfg_data
 
+class HandleIndex:
+    def __init__(self, handle, index):
+        self.handle = handle
+        self.index = index
+
+    @property
+    def value(self):
+        val = 0
+        val = self.handle.value[self.index]
+        return int(val)
+
+    @value.setter
+    def value(self, val):
+        val_update = self.handle.value
+        val_update[self.index] = val
+        self.handle.set(Immediate(val_update))
+
+    def setimmediatevalue(self, val):
+        self.value = val
+
 
 class CocotbSignalView:
     # note: signals[0] is the LSB in the view
@@ -1336,33 +1357,88 @@ class FlowControlHandler:
         self.tx_bus = tx_bus
         self.rx_bus = rx_bus
 
-        self.ph_sink = FlowControlSinkHandlerForHeader(
-            clk, tx_bus.hcrdt_update[0], CocotbSignalView([tx_bus.hcrdt_update_cnt[0], tx_bus.hcrdt_update_cnt[1]]), tx_bus.hcrdt_init[0], tx_bus.hcrdt_init_ack[0], fc_channel_state, FcType.P)
-        self.nph_sink = FlowControlSinkHandlerForHeader(
-            clk, tx_bus.hcrdt_update[1], CocotbSignalView([tx_bus.hcrdt_update_cnt[2], tx_bus.hcrdt_update_cnt[3]]), tx_bus.hcrdt_init[1], tx_bus.hcrdt_init_ack[1], fc_channel_state, FcType.NP)
-        self.cplh_sink = FlowControlSinkHandlerForHeader(
-            clk, tx_bus.hcrdt_update[2], CocotbSignalView([tx_bus.hcrdt_update_cnt[4], tx_bus.hcrdt_update_cnt[5]]), tx_bus.hcrdt_init[2], tx_bus.hcrdt_init_ack[2], fc_channel_state, FcType.CPL)
-        self.pd_sink = FlowControlSinkHandlerForData(
-            clk, tx_bus.dcrdt_update[0], CocotbSignalView([tx_bus.dcrdt_update_cnt[0], tx_bus.dcrdt_update_cnt[1], tx_bus.dcrdt_update_cnt[2], tx_bus.dcrdt_update_cnt[3]]), tx_bus.dcrdt_init[0], tx_bus.dcrdt_init_ack[0], fc_channel_state, FcType.P)
-        self.npd_sink = FlowControlSinkHandlerForData(
-            clk, tx_bus.dcrdt_update[1], CocotbSignalView([tx_bus.dcrdt_update_cnt[4], tx_bus.dcrdt_update_cnt[5], tx_bus.dcrdt_update_cnt[6], tx_bus.dcrdt_update_cnt[7]]), tx_bus.dcrdt_init[1], tx_bus.dcrdt_init_ack[1], fc_channel_state, FcType.NP)
-        self.cpld_sink = FlowControlSinkHandlerForData(
-            clk, tx_bus.dcrdt_update[2], CocotbSignalView([tx_bus.dcrdt_update_cnt[8], tx_bus.dcrdt_update_cnt[9], tx_bus.dcrdt_update_cnt[10], tx_bus.dcrdt_update_cnt[11]]), tx_bus.dcrdt_init[2], tx_bus.dcrdt_init_ack[2], fc_channel_state, FcType.CPL)
+        # self.ph_sink = FlowControlSinkHandlerForHeader(
+        #     clk, tx_bus.hcrdt_update[0], CocotbSignalView([tx_bus.hcrdt_update_cnt[0], tx_bus.hcrdt_update_cnt[1]]), tx_bus.hcrdt_init[0], tx_bus.hcrdt_init_ack[0], fc_channel_state, FcType.P)
+        # self.nph_sink = FlowControlSinkHandlerForHeader(
+        #     clk, tx_bus.hcrdt_update[1], CocotbSignalView([tx_bus.hcrdt_update_cnt[2], tx_bus.hcrdt_update_cnt[3]]), tx_bus.hcrdt_init[1], tx_bus.hcrdt_init_ack[1], fc_channel_state, FcType.NP)
+        # self.cplh_sink = FlowControlSinkHandlerForHeader(
+        #     clk, tx_bus.hcrdt_update[2], CocotbSignalView([tx_bus.hcrdt_update_cnt[4], tx_bus.hcrdt_update_cnt[5]]), tx_bus.hcrdt_init[2], tx_bus.hcrdt_init_ack[2], fc_channel_state, FcType.CPL)
+        # self.pd_sink = FlowControlSinkHandlerForData(
+        #     clk, tx_bus.dcrdt_update[0], CocotbSignalView([tx_bus.dcrdt_update_cnt[0], tx_bus.dcrdt_update_cnt[1], tx_bus.dcrdt_update_cnt[2], tx_bus.dcrdt_update_cnt[3]]), tx_bus.dcrdt_init[0], tx_bus.dcrdt_init_ack[0], fc_channel_state, FcType.P)
+        # self.npd_sink = FlowControlSinkHandlerForData(
+        #     clk, tx_bus.dcrdt_update[1], CocotbSignalView([tx_bus.dcrdt_update_cnt[4], tx_bus.dcrdt_update_cnt[5], tx_bus.dcrdt_update_cnt[6], tx_bus.dcrdt_update_cnt[7]]), tx_bus.dcrdt_init[1], tx_bus.dcrdt_init_ack[1], fc_channel_state, FcType.NP)
+        # self.cpld_sink = FlowControlSinkHandlerForData(
+        #     clk, tx_bus.dcrdt_update[2], CocotbSignalView([tx_bus.dcrdt_update_cnt[8], tx_bus.dcrdt_update_cnt[9], tx_bus.dcrdt_update_cnt[10], tx_bus.dcrdt_update_cnt[11]]), tx_bus.dcrdt_init[2], tx_bus.dcrdt_init_ack[2], fc_channel_state, FcType.CPL)
 
-        self.ph_source = FlowControlSourceHandlerForHeader(
-            clk, rx_bus.hcrdt_update[0], CocotbSignalView([rx_bus.hcrdt_update_cnt[0], rx_bus.hcrdt_update_cnt[1]]), rx_bus.hcrdt_init[0], rx_bus.hcrdt_init_ack[0], self, FcType.P)
-        self.nph_source = FlowControlSourceHandlerForHeader(
-            clk, rx_bus.hcrdt_update[1], CocotbSignalView([rx_bus.hcrdt_update_cnt[2], rx_bus.hcrdt_update_cnt[3]]), rx_bus.hcrdt_init[1], rx_bus.hcrdt_init_ack[1], self, FcType.NP)
-        self.cplh_source = FlowControlSourceHandlerForHeader(
-            clk, rx_bus.hcrdt_update[2], CocotbSignalView([rx_bus.hcrdt_update_cnt[4], rx_bus.hcrdt_update_cnt[5]]), rx_bus.hcrdt_init[2], rx_bus.hcrdt_init_ack[2], self, FcType.CPL)
-        self.pd_source = FlowControlSourceHandlerForData(
-            clk, rx_bus.dcrdt_update[0], CocotbSignalView([rx_bus.dcrdt_update_cnt[0], rx_bus.dcrdt_update_cnt[1], rx_bus.dcrdt_update_cnt[2], rx_bus.dcrdt_update_cnt[3]]), rx_bus.dcrdt_init[0], rx_bus.dcrdt_init_ack[0], self, FcType.P)
-        self.npd_source = FlowControlSourceHandlerForData(
-            clk, rx_bus.dcrdt_update[1], CocotbSignalView([rx_bus.dcrdt_update_cnt[4], rx_bus.dcrdt_update_cnt[5], rx_bus.dcrdt_update_cnt[6], rx_bus.dcrdt_update_cnt[7]]), rx_bus.dcrdt_init[1], rx_bus.dcrdt_init_ack[1], self, FcType.NP)
-        self.cpld_source = FlowControlSourceHandlerForData(
-            clk, rx_bus.dcrdt_update[2], CocotbSignalView([rx_bus.dcrdt_update_cnt[8], rx_bus.dcrdt_update_cnt[9], rx_bus.dcrdt_update_cnt[10], rx_bus.dcrdt_update_cnt[11]]), rx_bus.dcrdt_init[2], rx_bus.dcrdt_init_ack[2], self, FcType.CPL)
+        # self.ph_source = FlowControlSourceHandlerForHeader(
+        #     clk, rx_bus.hcrdt_update[0], CocotbSignalView([rx_bus.hcrdt_update_cnt[0], rx_bus.hcrdt_update_cnt[1]]), rx_bus.hcrdt_init[0], rx_bus.hcrdt_init_ack[0], self, FcType.P)
+        # self.nph_source = FlowControlSourceHandlerForHeader(
+        #     clk, rx_bus.hcrdt_update[1], CocotbSignalView([rx_bus.hcrdt_update_cnt[2], rx_bus.hcrdt_update_cnt[3]]), rx_bus.hcrdt_init[1], rx_bus.hcrdt_init_ack[1], self, FcType.NP)
+        # self.cplh_source = FlowControlSourceHandlerForHeader(
+        #     clk, rx_bus.hcrdt_update[2], CocotbSignalView([rx_bus.hcrdt_update_cnt[4], rx_bus.hcrdt_update_cnt[5]]), rx_bus.hcrdt_init[2], rx_bus.hcrdt_init_ack[2], self, FcType.CPL)
+        # self.pd_source = FlowControlSourceHandlerForData(
+        #     clk, rx_bus.dcrdt_update[0], CocotbSignalView([rx_bus.dcrdt_update_cnt[0], rx_bus.dcrdt_update_cnt[1], rx_bus.dcrdt_update_cnt[2], rx_bus.dcrdt_update_cnt[3]]), rx_bus.dcrdt_init[0], rx_bus.dcrdt_init_ack[0], self, FcType.P)
+        # self.npd_source = FlowControlSourceHandlerForData(
+        #     clk, rx_bus.dcrdt_update[1], CocotbSignalView([rx_bus.dcrdt_update_cnt[4], rx_bus.dcrdt_update_cnt[5], rx_bus.dcrdt_update_cnt[6], rx_bus.dcrdt_update_cnt[7]]), rx_bus.dcrdt_init[1], rx_bus.dcrdt_init_ack[1], self, FcType.NP)
+        # self.cpld_source = FlowControlSourceHandlerForData(
+        #     clk, rx_bus.dcrdt_update[2], CocotbSignalView([rx_bus.dcrdt_update_cnt[8], rx_bus.dcrdt_update_cnt[9], rx_bus.dcrdt_update_cnt[10], rx_bus.dcrdt_update_cnt[11]]), rx_bus.dcrdt_init[2], rx_bus.dcrdt_init_ack[2], self, FcType.CPL)
+        # self.ph_source = FlowControlSinkHandlerForHeader(
+        #     clk, HandleIndex(rx_bus.hcrdt_update, 0), CocotbSignalView([HandleIndex(rx_bus.hcrdt_update_cnt, 0), HandleIndex(rx_bus.hcrdt_update_cnt,1)], HandleIndex(rx_bus.hcrdt_init, 0), HandleIndex(rx_bus.hcrdt_init_ack, 0), fc_channel_state, FcType.P)
+        # )
+        self.ph_sink = self._build_fc_handler(
+            clk, tx_bus, "hcrdt", 0, 2, FlowControlSinkHandlerForHeader, fc_channel_state, FcType.P)
+        self.nph_sink = self._build_fc_handler(
+            clk, tx_bus, "hcrdt", 1, 2, FlowControlSinkHandlerForHeader, fc_channel_state, FcType.NP)
+        self.cplh_sink = self._build_fc_handler(
+            clk, tx_bus, "hcrdt", 2, 2, FlowControlSinkHandlerForHeader, fc_channel_state, FcType.CPL)
+
+        self.pd_sink = self._build_fc_handler(
+            clk, tx_bus, "dcrdt", 0, 4, FlowControlSinkHandlerForData, fc_channel_state, FcType.P)
+        self.npd_sink = self._build_fc_handler(
+            clk, tx_bus, "dcrdt", 1, 4, FlowControlSinkHandlerForData, fc_channel_state, FcType.NP)
+        self.cpld_sink = self._build_fc_handler(
+            clk, tx_bus, "dcrdt", 2, 4, FlowControlSinkHandlerForData, fc_channel_state, FcType.CPL)
+
+        self.ph_source = self._build_fc_handler(
+            clk, rx_bus, "hcrdt", 0, 2, FlowControlSourceHandlerForHeader, self, FcType.P)
+        self.nph_source = self._build_fc_handler(
+            clk, rx_bus, "hcrdt", 1, 2, FlowControlSourceHandlerForHeader, self, FcType.NP)
+        self.cplh_source = self._build_fc_handler(
+            clk, rx_bus, "hcrdt", 2, 2, FlowControlSourceHandlerForHeader, self, FcType.CPL)
+
+        self.pd_source = self._build_fc_handler(
+            clk, rx_bus, "dcrdt", 0, 4, FlowControlSourceHandlerForData, self, FcType.P)
+        self.npd_source = self._build_fc_handler(
+            clk, rx_bus, "dcrdt", 1, 4, FlowControlSourceHandlerForData, self, FcType.NP)
+        self.cpld_source = self._build_fc_handler(
+            clk, rx_bus, "dcrdt", 2, 4, FlowControlSourceHandlerForData, self, FcType.CPL)
 
         self.source_credit_update_event = Event()
+
+    @staticmethod
+    def _make_signal_view(signal, start, width):
+        return CocotbSignalView([
+            HandleIndex(signal, start + offset)
+            for offset in range(width)
+        ])
+
+    @classmethod
+    def _build_fc_handler(cls, clk, bus, prefix, index, width,
+                          handler_cls, parent, fc_type):
+        return handler_cls(
+            clk,
+            HandleIndex(getattr(bus, f"{prefix}_update"), index),
+            cls._make_signal_view(
+                getattr(bus, f"{prefix}_update_cnt"),
+                index * width,
+                width
+            ),
+            HandleIndex(getattr(bus, f"{prefix}_init"), index),
+            HandleIndex(getattr(bus, f"{prefix}_init_ack"), index),
+            parent,
+            fc_type
+        )
+
 
     def source_credit_update_callback(self):
         self.source_credit_update_event.set()
@@ -1503,10 +1579,10 @@ class FlowControlSourceHandlerForData:
         self.log.debug(
             f"init finished. credit advertised by user logic is: {self.init_val}")
 
-        # normal operate stste
+        # normal operate state
         while True:
             if self.crdt_update.value == 1:
-                self.init_val += self.crdt_update_cnt.value
+                self.available_val += self.crdt_update_cnt.value             # self.available_val ????????????
                 self.parent_fc_handler.source_credit_update_callback()
             await RisingEdge(self.clk)
 

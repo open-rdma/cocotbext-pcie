@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """
 
-Copyright (c) 2020 Alex Forencich
+Copyright (c) 2020-2025 Alex Forencich
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -547,7 +547,8 @@ async def run_test_msi(dut, ep_index=0):
         event.clear()
         await event.wait()
 
-if cocotb.SIM_NAME:
+
+if getattr(cocotb, 'top', None) is not None:
 
     for test in [
                 run_test_rc_mem,
