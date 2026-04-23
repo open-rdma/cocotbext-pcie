@@ -40,7 +40,14 @@ from .pci import PciDevice, PciHostBridge
 
 
 class RootComplex(Switch):
-    def __init__(self, mem_address_space=None, io_address_space=None, *args, **kwargs):
+    def __init__(self, mem_address_space=None, io_address_space=None,
+                 io_base=0x8000_0000,
+                 mem_base=0xc000_0000,
+                 prefetchable_mem_base=0x8000_0000_0000_0000,
+                 mem_pool_range=(0x0000_0000, 0x8000_0000),
+                 io_pool_range=(0x0000_0000, 0x8000_0000),
+                 msi_base=0x8000_0000,
+                 *args, **kwargs):
 
         self.default_upstream_bridge = HostBridge
         self.default_downstream_bridge = RootPort
@@ -73,11 +80,11 @@ class RootComplex(Switch):
 
         self.host_bridge = PciHostBridge(rc=self)
 
-        self.io_base = 0x8000_0000
+        self.io_base = io_base
         self.io_limit = self.io_base
-        self.mem_base = 0xc000_0000
+        self.mem_base = mem_base
         self.mem_limit = self.mem_base
-        self.prefetchable_mem_base = 0x8000_0000_0000_0000
+        self.prefetchable_mem_base = prefetchable_mem_base
         self.prefetchable_mem_limit = self.prefetchable_mem_base
 
         self.upstream_bridge.io_base = self.io_base
@@ -108,8 +115,8 @@ class RootComplex(Switch):
         self.io_address_space.register_region(self.io_region,
                 self.io_base, self.io_base & -self.io_base, offset=None)
 
-        self.mem_pool = self.mem_address_space.create_pool(0x0000_0000, 0x8000_0000)
-        self.io_pool = self.io_address_space.create_pool(0x0000_0000, 0x8000_0000)
+        self.mem_pool = self.mem_address_space.create_pool(*mem_pool_range) if mem_pool_range else None
+        self.io_pool = self.io_address_space.create_pool(*io_pool_range) if io_pool_range else None
 
         self.region_base = 0
         self.region_limit = self.region_base
@@ -122,7 +129,7 @@ class RootComplex(Switch):
 
         self.msi_region = MsiRegion(self)
 
-        self.mem_address_space.register_region(self.msi_region, 0x8000_0000)
+        self.mem_address_space.register_region(self.msi_region, msi_base)
 
         self.msi_addr = None
         self.msi_msg_limit = 0
@@ -173,10 +180,14 @@ class RootComplex(Switch):
         self.upstream_bridge.pcie_cap.read_completion_boundary = val
 
     def alloc_region(self, size):
+        if self.mem_pool is None:
+            raise RuntimeError("No memory pool configured")
         region = self.mem_pool.alloc_region(size)
         return region.get_absolute_address(0), region.mem
 
     def alloc_io_region(self, size):
+        if self.io_pool is None:
+            raise RuntimeError("No IO pool configured")
         region = self.io_pool.alloc_region(size)
         return region.get_absolute_address(0), region.mem
 
