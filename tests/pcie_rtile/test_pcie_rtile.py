@@ -316,9 +316,8 @@ class TB:
         rtile_rx_bus = RTileRxBus.from_prefix(dut, "rx_st")
         self.tx_source = RTilePcieSource(rtile_tx_bus, dut.coreclkout_hip)
         self.tx_source.ready_latency = 3
-        self.rx_sink = RTilePcieSink(rtile_rx_bus, dut.coreclkout_hip)
-        # TODO: set bdf???????
-        self.rx_sink.set_bdf(256) # set bus 1, device 0, function 0
+        self.rx_sink = RTilePcieSink(rtile_rx_bus, dut.coreclkout_hip, fill_requester_id=False)
+
         self.rx_sink.ready_latency = 27
 
         self.fc_channel_state = UserFcChannelState(dut.coreclkout_hip)

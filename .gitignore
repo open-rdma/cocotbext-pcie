@@ -12,3 +12,6 @@ __pycache__/
 .tox
 sim_build_*
 .coverage
+
+*.xml
+**/sim_build/**

@@ -32,8 +32,8 @@ from cocotb.types import Logic, LogicArray
 from cocotb_bus.bus import Bus
 from cocotb.handle import Immediate
 
-from cocotbext.pcie.core.tlp import Tlp
-
+from cocotbext.pcie.core.tlp import Tlp, TlpType
+from cocotbext.pcie.core.utils import PcieId
 
 class BaseBus(Bus):
 
@@ -605,13 +605,14 @@ class RTilePcieSink(RTilePcieBase):
     _transaction_obj = RTilePcieTransaction
     _frame_obj = RTilePcieFrame
 
-    def __init__(self, bus, clock, reset=None, ready_latency=0, *args, **kwargs):
+    def __init__(self, bus, clock, reset=None, ready_latency=0, fill_requester_id=True, *args, **kwargs):
         super().__init__(bus, clock, reset, ready_latency, *args, **kwargs)
 
         self.sample_obj = None
         self.sample_sync = Event()
 
         self.bdf = None
+        self.fill_requester_id = fill_requester_id
 
         self.queue_occupancy_limit_bytes = -1
         self.queue_occupancy_limit_frames = -1
@@ -623,6 +624,54 @@ class RTilePcieSink(RTilePcieBase):
 
     def set_bdf(self, bdf):
         self.bdf = bdf
+
+    @staticmethod
+    def _is_requester_tlp(tlp):
+        return tlp.fmt_type in {
+            TlpType.CFG_READ_0,
+            TlpType.CFG_WRITE_0,
+            TlpType.CFG_READ_1,
+            TlpType.CFG_WRITE_1,
+            TlpType.MEM_READ,
+            TlpType.MEM_READ_64,
+            TlpType.MEM_READ_LOCKED,
+            TlpType.MEM_READ_LOCKED_64,
+            TlpType.MEM_WRITE,
+            TlpType.MEM_WRITE_64,
+            TlpType.IO_READ,
+            TlpType.IO_WRITE,
+            TlpType.FETCH_ADD,
+            TlpType.FETCH_ADD_64,
+            TlpType.SWAP,
+            TlpType.SWAP_64,
+            TlpType.CAS,
+            TlpType.CAS_64,
+        }
+
+    def _fill_requester_id(self, frame):
+        tlp = Tlp.unpack_header(frame.hdr.to_bytes(16, 'big'))
+
+        if not self._is_requester_tlp(tlp):
+            return
+
+        if self.bdf is None:
+            raise RuntimeError(
+                f"Requester TLP {tlp.fmt_type.name} observed before BDF is known; "
+                "R-Tile tx sink has not learned completer_id from config type 0 traffic yet"
+            )
+
+        if tlp.requester_id != PcieId(0, 0, 0):
+            self.log.warning(
+                "Requester TLP with non-zero requester_id observed: %s; "
+                "overwriting with BDF %s anyway",
+                tlp.requester_id,
+                self.bdf,
+            )
+        
+        tlp.requester_id = self.bdf
+        frame.hdr = int.from_bytes(tlp.pack_header().ljust(16, b'\x00'), 'big')
+        frame.hdr_par = parity(frame.hdr)
+
 
     def _recv(self, frame):
         if self.queue.empty():
@@ -725,11 +774,8 @@ class RTilePcieSink(RTilePcieBase):
                             dword_count = 1024
                     else:
                         dword_count = 0
-
-                    # if (frame.hdr >> 124) & 0b101 in [0b001, 0b000]:
-                    #     requester_id_mask = (0xFFFF << 80)
-                    #     frame.hdr &= ~requester_id_mask
-                    #     frame.hdr |= self.bdf << 80
+                    if self.fill_requester_id:
+                        self._fill_requester_id(frame)
 
                     frame.bar = (sample.bar >> seg*3) & 0x7
                     frame.pfnum = (sample.pfnum >> seg*3) & 0x7

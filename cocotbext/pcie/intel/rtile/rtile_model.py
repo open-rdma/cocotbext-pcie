@@ -799,7 +799,7 @@ class RTilePcieDevice(Device):
 
             # capture address information
             self.bus_num = tlp.completer_id.bus
-            self.tx_sink.set_bdf(int(tlp.completer_id))
+            self.tx_sink.set_bdf(tlp.completer_id)
 
             # pass TLP to function
             for f in self.functions:
