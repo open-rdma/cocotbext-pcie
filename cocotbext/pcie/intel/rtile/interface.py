@@ -355,6 +355,8 @@ class RTilePcieBase:
     def clear(self):
         while not self.queue.empty():
             self.queue.get_nowait()
+        self.queue_occupancy_bytes = 0
+        self.queue_occupancy_frames = 0
         self.idle_event.set()
         self.active_event.clear()
 
@@ -400,6 +402,8 @@ class RTilePcieSource(RTilePcieBase):
 
         self.drive_obj = None
         self.drive_sync = Event()
+        self._run_source_cr = None
+        self._run_cr = None
 
         self.queue_occupancy_limit_bytes = -1
         self.queue_occupancy_limit_frames = -1
@@ -437,8 +441,25 @@ class RTilePcieSource(RTilePcieBase):
         if hasattr(self.bus, "prefix_par"):
             self.bus.prefix_par.value = Immediate(0)
 
-        cocotb.start_soon(self._run_source())
-        cocotb.start_soon(self._run())
+        self._run_source_cr = cocotb.start_soon(self._run_source())
+        self._run_cr = cocotb.start_soon(self._run())
+
+    def stop(self):
+        # TODO: Repeated reset is not fully supported yet.  This stop path is
+        # only validated for a single lifecycle teardown and may need extra
+        # state cleanup before the source can be safely restarted in the same
+        # simulation after another reset.
+        for task_name in ("_run_source_cr", "_run_cr"):
+            task = getattr(self, task_name)
+            if task is not None:
+                task.kill()
+                setattr(self, task_name, None)
+
+        self.drive_obj = None
+        self.bus.hvalid.value = 0
+        self.bus.dvalid.value = 0
+        self.active = False
+        self.clear()
 
     async def _drive(self, obj):
         if self.drive_obj is not None:
@@ -613,14 +634,32 @@ class RTilePcieSink(RTilePcieBase):
 
         self.bdf = None
         self.fill_requester_id = fill_requester_id
+        self._run_sink_cr = None
+        self._run_cr = None
 
         self.queue_occupancy_limit_bytes = -1
         self.queue_occupancy_limit_frames = -1
 
         self.bus.ready.value = 0
 
-        cocotb.start_soon(self._run_sink())
-        cocotb.start_soon(self._run())
+        self._run_sink_cr = cocotb.start_soon(self._run_sink())
+        self._run_cr = cocotb.start_soon(self._run())
+
+    def stop(self):
+        # TODO: Repeated reset is not fully supported yet.  This stop path is
+        # only validated for a single lifecycle teardown and may need extra
+        # state cleanup before the sink can be safely restarted in the same
+        # simulation after another reset.
+        for task_name in ("_run_sink_cr", "_run_cr"):
+            task = getattr(self, task_name)
+            if task is not None:
+                task.kill()
+                setattr(self, task_name, None)
+
+        self.sample_obj = None
+        self.bus.ready.value = 0
+        self.active = False
+        self.clear()
 
     def set_bdf(self, bdf):
         self.bdf = bdf

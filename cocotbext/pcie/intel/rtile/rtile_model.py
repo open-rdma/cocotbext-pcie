@@ -323,6 +323,14 @@ class RTilePcieDevice(Device):
         self.dw = None
 
         self.rx_queue = Queue()
+        self.rx_source = None
+        self.tx_sink = None
+        self.user_logic_side_fc_handler = None
+        self.user_session = None
+        self._user_logic_epoch = 0
+        self._tx_bdf = None
+        self._rx_bus = rx_bus
+        self._tx_bus = tx_bus
 
         if port_num == 0:
             # UG lists 1444 CPLH and 2016 "512 bit" CPLD
@@ -394,24 +402,16 @@ class RTilePcieDevice(Device):
         self.pin_perst_n = init_signal(pin_perst_n, 1)
 
         # RX interface
-        self.rx_source = None
         self.rx_par_err = init_signal(rx_par_err, 1, 0)
 
         if rx_bus is not None:
-            self.rx_source = RTilePcieSource(rx_bus, self.coreclkout_hip)
-            self.rx_source.queue_occupancy_limit_frames = 2
-            self.rx_source.ready_latency = 27
-            self.dw = self.rx_source.width
+            self.dw = len(rx_bus.data)
 
         # TX interface
-        self.tx_sink = None
         self.tx_par_err = init_signal(tx_par_err, 1, 0)
 
         if tx_bus is not None:
-            self.tx_sink = RTilePcieSink(tx_bus, self.coreclkout_hip)
-            self.tx_sink.queue_occupancy_limit_frames = 2
-            self.tx_sink.ready_latency = 3
-            self.dw = self.tx_sink.width
+            self.dw = len(tx_bus.data)
 
         # Power management and hard IP status interface
         self.link_up = init_signal(link_up, 1, 0)
@@ -767,27 +767,11 @@ class RTilePcieDevice(Device):
                 self.max_payload_size//128-1).bit_length()
             f.pcie_cap.extended_tag_supported = self.enable_extended_tag
 
-        self.user_logic_side_fc_handler = FlowControlHandler(
-            self.upstream_port.fc_state[0],
-            self.coreclkout_hip,
-            tx_bus,
-            rx_bus
-        )
-
         # fork coroutines
-
-        cocotb.start_soon(self.user_logic_side_fc_handler.run())
 
         if self.coreclkout_hip is not None:
             cocotb.start_soon(Clock(self.coreclkout_hip, int(
                 1e9/self.pld_clk_frequency), unit="ns").start())
-
-        if self.rx_source:
-            cocotb.start_soon(self._run_rx_logic())
-        if self.tx_sink:
-            cocotb.start_soon(self._run_tx_logic())
-        if self.tl_cfg_ctl is not None:
-            cocotb.start_soon(self._run_cfg_out_logic())
 
         cocotb.start_soon(self._run_reset())
 
@@ -799,7 +783,9 @@ class RTilePcieDevice(Device):
 
             # capture address information
             self.bus_num = tlp.completer_id.bus
-            self.tx_sink.set_bdf(tlp.completer_id)
+            self._tx_bdf = tlp.completer_id
+            if self.user_session is not None:
+                self.user_session.tx_sink.set_bdf(tlp.completer_id)
 
             # pass TLP to function
             for f in self.functions:
@@ -834,7 +820,7 @@ class RTilePcieDevice(Device):
                     if self.rx_buf_cplh_fc_count+1 <= self.rx_buf_cplh_fc_limit and self.rx_buf_cpld_fc_count+data_fc <= self.rx_buf_cpld_fc_limit:
                         self.rx_buf_cplh_fc_count += 1
                         self.rx_buf_cpld_fc_count += data_fc
-                        await self.rx_queue.put((tlp, frame))
+                        await self.rx_queue.put((self._user_logic_epoch, tlp, frame))
                     else:
                         self.log.warning("No space in RX completion buffer, dropping TLP: CPLH %d (limit %d), CPLD %d (limit %d)",
                                          self.rx_buf_cplh_fc_count, self.rx_buf_cplh_fc_limit, self.rx_buf_cpld_fc_count, self.rx_buf_cpld_fc_limit)
@@ -858,7 +844,7 @@ class RTilePcieDevice(Device):
                     frame.bar = 6
                     frame.pfnum = tlp.requester_id.function
 
-                    await self.rx_queue.put((tlp, frame))
+                    await self.rx_queue.put((self._user_logic_epoch, tlp, frame))
 
                     return
 
@@ -878,7 +864,7 @@ class RTilePcieDevice(Device):
                     frame.bar = bar[0]
                     frame.pfnum = tlp.requester_id.function
 
-                    await self.rx_queue.put((tlp, frame))
+                    await self.rx_queue.put((self._user_logic_epoch, tlp, frame))
 
                     return
 
@@ -906,6 +892,8 @@ class RTilePcieDevice(Device):
             await clock_edge_event
             await clock_edge_event
 
+            await self._stop_user_session()
+
             if self.reset_status is not None:
                 self.reset_status.value = 1
             if self.reset_status_n is not None:
@@ -927,36 +915,39 @@ class RTilePcieDevice(Device):
             if self.reset_status_n is not None:
                 self.reset_status_n.value = 1
 
+            self._start_user_session()
+
             if self.pin_perst_n is not None:
                 await FallingEdge(self.pin_perst_n)
             else:
+                # In auto-reset mode there is no external PERST# to end the
+                # session. Keep the user session alive for the remainder of the
+                # simulation instead of immediately tearing it down again.
+                await Timer(1, "ns")
+                await Event().wait()
                 return
 
-    async def _run_rx_logic(self):
-        while True:
-            tlp, frame = await self.rx_queue.get()
+    def _start_user_session(self):
+        if self._rx_bus is None and self._tx_bus is None and self.tl_cfg_ctl is None:
+            return
 
-            # block if there is congestion between rtile and user logic
-            await self.user_logic_side_fc_handler.wait_until_rx_source_has_enough_credits(tlp)
+        self._user_logic_epoch += 1
+        self.user_session = RTileUserLogicSession(self, self._user_logic_epoch)
+        self.user_session.start()
 
-            # following line will update credits for flow control between rtile and pcie link partener
-            tlp.release_fc()
-            # following line will update credits for flow control between rtile and user logic
-            self.user_logic_side_fc_handler.consume_rx_source_credits(tlp)
+    async def _stop_user_session(self):
+        if self.user_session is None:
+            return
 
-            await self.rx_source.send(frame)
+        session = self.user_session
+        self.user_session = None
+        await session.stop()
 
-            # this is used for checking the overflow of hard ip core's internal cplt buffer
-            self.rx_buf_cplh_fc_count = max(self.rx_buf_cplh_fc_count-1, 0)
-            self.rx_buf_cpld_fc_count = max(
-                self.rx_buf_cpld_fc_count-tlp.get_data_credits(), 0)
-
-    async def _run_tx_logic(self):
-        while True:
-            frame = await self.tx_sink.recv()
-            tlp = frame.to_tlp()
-            await self.send(tlp)
-            self.user_logic_side_fc_handler.release_tx_sink_credits(tlp)
+    def _release_rx_entry(self, tlp):
+        tlp.release_fc()
+        self.rx_buf_cplh_fc_count = max(self.rx_buf_cplh_fc_count-1, 0)
+        self.rx_buf_cpld_fc_count = max(
+            self.rx_buf_cpld_fc_count-tlp.get_data_credits(), 0)
 
     async def _run_pm_status_logic(self):
         pass
@@ -1000,216 +991,7 @@ class RTilePcieDevice(Device):
     # cpl_timeout_avmm_waitrequest
 
     async def _run_cfg_out_logic(self):
-        clock_edge_event = RisingEdge(self.coreclkout_hip)
-
-        while True:
-            for func in self.functions:
-                self.tl_cfg_func.value = func.pcie_id.function
-
-                self.tl_cfg_add.value = 0x00
-                val = bool(func.memory_space_enable) << 15
-                val |= bool(func.pcie_cap.ido_completion_enable) << 14
-                val |= bool(func.parity_error_response_enable) << 13
-                val |= bool(func.serr_enable) << 12
-                val |= bool(func.pcie_cap.fatal_error_reporting_enable) << 11
-                val |= bool(
-                    func.pcie_cap.non_fatal_error_reporting_enable) << 10
-                val |= bool(
-                    func.pcie_cap.correctable_error_reporting_enable) << 9
-                val |= bool(
-                    func.pcie_cap.unsupported_request_reporting_enable) << 8
-                val |= bool(func.bus_master_enable) << 7
-                val |= bool(func.pcie_cap.extended_tag_field_enable) << 6
-                val |= (func.pcie_cap.max_read_request_size & 0x7) << 3
-                val |= (func.pcie_cap.max_payload_size & 0x7)
-                self.tl_cfg_ctl.value = val
-                await clock_edge_event
-
-                self.tl_cfg_add.value = 0x01
-                val = bool(func.pcie_cap.ido_request_enable) << 15
-                val |= bool(func.pcie_cap.enable_no_snoop) << 14
-                val |= bool(func.pcie_cap.enable_relaxed_ordering) << 13
-                val |= (func.pcie_id.device & 0x1f) << 8
-                val |= func.pcie_id.bus & 0xff
-                self.tl_cfg_ctl.value = val
-                await clock_edge_event
-
-                self.tl_cfg_add.value = 0x02
-                val = bool(func.pm_cap.no_soft_reset) << 15
-                val |= bool(func.pcie_cap.read_completion_boundary) << 14
-                val |= bool(func.interrupt_disable) << 13
-                val |= (func.pcie_cap.interrupt_message_number & 0x1f) << 8
-                val |= bool(func.pcie_cap.power_controller_control) << 4
-                val |= (func.pcie_cap.attention_indicator_control & 0x3) << 2
-                val |= func.pcie_cap.power_indicator_control & 0x3
-                self.tl_cfg_ctl.value = val
-                await clock_edge_event
-
-                self.tl_cfg_add.value = 0x03
-                # num vfs
-                self.tl_cfg_ctl.value = 0
-                await clock_edge_event
-
-                self.tl_cfg_add.value = 0x04
-                val = bool(func.pcie_cap.atomic_op_egress_blocking) << 14
-                # ats
-                val |= bool(func.pcie_cap.ari_forwarding_enable) << 7
-                val |= bool(func.pcie_cap.atomic_op_requester_enable) << 6
-                # tph
-                # vf en
-                self.tl_cfg_ctl.value = val
-                await clock_edge_event
-
-                self.tl_cfg_add.value = 0x05
-                val = (func.pcie_cap.current_link_speed & 0xf) << 12
-                # start vf
-                self.tl_cfg_ctl.value = val
-                await clock_edge_event
-
-                self.tl_cfg_add.value = 0x06
-                self.tl_cfg_ctl.value = func.msi_cap.msi_message_address & 0xffff
-                await clock_edge_event
-
-                self.tl_cfg_add.value = 0x07
-                self.tl_cfg_ctl.value = (
-                    func.msi_cap.msi_message_address >> 16) & 0xffff
-                await clock_edge_event
-
-                self.tl_cfg_add.value = 0x08
-                self.tl_cfg_ctl.value = (
-                    func.msi_cap.msi_message_address >> 32) & 0xffff
-                await clock_edge_event
-
-                self.tl_cfg_add.value = 0x09
-                self.tl_cfg_ctl.value = (
-                    func.msi_cap.msi_message_address >> 48) & 0xffff
-                await clock_edge_event
-
-                self.tl_cfg_add.value = 0x0A
-                self.tl_cfg_ctl.value = func.msi_cap.msi_mask_bits & 0xffff
-                await clock_edge_event
-
-                self.tl_cfg_add.value = 0x0B
-                self.tl_cfg_ctl.value = (
-                    func.msi_cap.msi_mask_bits >> 16) & 0xffff
-                await clock_edge_event
-
-                self.tl_cfg_add.value = 0x0C
-                val = bool(
-                    func.pcie_cap.system_error_on_fatal_error_enable) << 15
-                val |= bool(
-                    func.pcie_cap.system_error_on_non_fatal_error_enable) << 14
-                val |= bool(
-                    func.pcie_cap.system_error_on_correctable_error_enable) << 13
-                val |= (
-                    func.aer_ext_cap.advanced_error_interrupt_message_number & 0x1f) << 8
-                val |= bool(func.msi_cap.msi_extended_message_data_enable) << 7
-                val |= bool(func.msix_cap.msix_function_mask) << 6
-                val |= bool(func.msix_cap.msix_enable) << 5
-                val |= (func.msi_cap.msi_multiple_message_enable & 0x7) << 2
-                val |= bool(func.msi_cap.msi_64bit_address_capable) << 1
-                val |= bool(func.msi_cap.msi_enable)
-                self.tl_cfg_ctl.value = val
-                await clock_edge_event
-
-                self.tl_cfg_add.value = 0x0D
-                self.tl_cfg_ctl.value = func.msi_cap.msi_message_data & 0xffff
-                await clock_edge_event
-
-                self.tl_cfg_add.value = 0x0E
-                # AER uncorrectable error mask
-                val = await func.aer_ext_cap.read_register(2)
-                self.tl_cfg_ctl.value = val & 0xffff
-                await clock_edge_event
-
-                self.tl_cfg_add.value = 0x0F
-                # AER uncorrectable error mask
-                self.tl_cfg_ctl.value = (val >> 16) & 0xffff
-                await clock_edge_event
-
-                self.tl_cfg_add.value = 0x10
-                # AER correctable error mask
-                val = await func.aer_ext_cap.read_register(5)
-                self.tl_cfg_ctl.value = val & 0xffff
-                await clock_edge_event
-
-                self.tl_cfg_add.value = 0x11
-                # AER correctable error mask
-                self.tl_cfg_ctl.value = (val >> 16) & 0xffff
-                await clock_edge_event
-
-                self.tl_cfg_add.value = 0x12
-                # AER uncorrectable error severity
-                val = await func.aer_ext_cap.read_register(3)
-                self.tl_cfg_ctl.value = val & 0xffff
-                await clock_edge_event
-
-                self.tl_cfg_add.value = 0x13
-                # AER uncorrectable error severity
-                self.tl_cfg_ctl.value = (val >> 16) & 0xffff
-                await clock_edge_event
-
-                self.tl_cfg_add.value = 0x14
-                # acs
-                self.tl_cfg_ctl.value = 0
-                await clock_edge_event
-
-                self.tl_cfg_add.value = 0x15
-                # prs
-                self.tl_cfg_ctl.value = 0
-                await clock_edge_event
-
-                self.tl_cfg_add.value = 0x16
-                # prs
-                self.tl_cfg_ctl.value = 0
-                await clock_edge_event
-
-                self.tl_cfg_add.value = 0x17
-                # prs
-                self.tl_cfg_ctl.value = 0
-                await clock_edge_event
-
-                self.tl_cfg_add.value = 0x18
-                # ltr
-                # pasid
-                self.tl_cfg_ctl.value = 0
-                await clock_edge_event
-
-                self.tl_cfg_add.value = 0x19
-                # slot control
-                self.tl_cfg_ctl.value = 0
-                await clock_edge_event
-
-                self.tl_cfg_add.value = 0x1A
-                # ltr max snoop lat
-                self.tl_cfg_ctl.value = 0
-                await clock_edge_event
-
-                self.tl_cfg_add.value = 0x1B
-                # ltr max snoop lat
-                self.tl_cfg_ctl.value = 0
-                await clock_edge_event
-
-                self.tl_cfg_add.value = 0x1C
-                # TC en
-                val = func.pcie_cap.negotiated_link_width & 0x3f
-                self.tl_cfg_ctl.value = val
-                await clock_edge_event
-
-                self.tl_cfg_add.value = 0x1D
-                self.tl_cfg_ctl.value = (
-                    func.msi_cap.msi_message_data >> 16) & 0xffff
-                await clock_edge_event
-
-                self.tl_cfg_add.value = 0x1E
-                self.tl_cfg_ctl.value = 0
-                await clock_edge_event
-
-                self.tl_cfg_add.value = 0x1F
-                self.tl_cfg_ctl.value = 0
-                await clock_edge_event
-
-        # dl_timer_update
+        raise RuntimeError("R-Tile cfg output logic is session-scoped")
 
     # Configuration intercept interface
     # cii_req
@@ -1296,6 +1078,280 @@ class RTilePcieDevice(Device):
     # virtio_pcicfg_rdbe
     # virtio_pcicfg_data
 
+
+class RTileUserLogicSession:
+    def __init__(self, device, epoch):
+        self.device = device
+        self.epoch = epoch
+        self.is_running = False
+        self._tasks = []
+
+        self.rx_source = None
+        if self.device._rx_bus is not None:
+            self.rx_source = RTilePcieSource(self.device._rx_bus, self.device.coreclkout_hip)
+            self.rx_source.queue_occupancy_limit_frames = 2
+            self.rx_source.ready_latency = 27
+
+        self.tx_sink = None
+        if self.device._tx_bus is not None:
+            self.tx_sink = RTilePcieSink(self.device._tx_bus, self.device.coreclkout_hip)
+            self.tx_sink.queue_occupancy_limit_frames = 2
+            self.tx_sink.ready_latency = 3
+            if self.device._tx_bdf is not None:
+                self.tx_sink.set_bdf(self.device._tx_bdf)
+
+        self.fc_handler = None
+        if self.device._rx_bus is not None and self.device._tx_bus is not None:
+            self.fc_handler = FlowControlHandler(
+                self.device.upstream_port.fc_state[0],
+                self.device.coreclkout_hip,
+                self.device._tx_bus,
+                self.device._rx_bus,
+            )
+
+    def start(self):
+        if self.is_running:
+            return
+
+        self.is_running = True
+        self.device.rx_source = self.rx_source
+        self.device.tx_sink = self.tx_sink
+        self.device.user_logic_side_fc_handler = self.fc_handler
+
+        if self.rx_source is not None:
+            self._tasks.append(cocotb.start_soon(self._run_rx_logic()))
+        if self.tx_sink is not None:
+            self._tasks.append(cocotb.start_soon(self._run_tx_logic()))
+        if self.device.tl_cfg_ctl is not None:
+            self._tasks.append(cocotb.start_soon(self._run_cfg_out_logic()))
+
+    async def stop(self):
+        # TODO: Repeated reset is not fully supported yet.  This session stop
+        # path is only validated for one teardown and needs more testing and
+        # state reconstruction work before reset can safely stop/start the same
+        # session multiple times in one simulation.
+        if not self.is_running:
+            return
+
+        self.is_running = False
+
+        for task in self._tasks:
+            task.kill()
+        self._tasks = []
+
+        if self.fc_handler is not None:
+            self.fc_handler.stop()
+        if self.rx_source is not None:
+            self.rx_source.stop()
+        if self.tx_sink is not None:
+            self.tx_sink.stop()
+
+        if self.device.user_logic_side_fc_handler is self.fc_handler:
+            self.device.user_logic_side_fc_handler = None
+        if self.device.rx_source is self.rx_source:
+            self.device.rx_source = None
+        if self.device.tx_sink is self.tx_sink:
+            self.device.tx_sink = None
+
+        await Timer(1, "ns")
+
+    async def _run_rx_logic(self):
+        while True:
+            epoch, tlp, frame = await self.device.rx_queue.get()
+
+            if epoch != self.epoch:
+                self.device._release_rx_entry(tlp)
+                continue
+
+            await self.fc_handler.wait_until_rx_source_has_enough_credits(tlp)
+            self.device._release_rx_entry(tlp)
+            self.fc_handler.consume_rx_source_credits(tlp)
+            await self.rx_source.send(frame)
+
+    async def _run_tx_logic(self):
+        while True:
+            frame = await self.tx_sink.recv()
+            tlp = frame.to_tlp()
+            await self.device.send(tlp)
+            self.fc_handler.release_tx_sink_credits(tlp)
+
+    async def _run_cfg_out_logic(self):
+        clock_edge_event = RisingEdge(self.device.coreclkout_hip)
+
+        while True:
+            for func in self.device.functions:
+                self.device.tl_cfg_func.value = func.pcie_id.function
+
+                self.device.tl_cfg_add.value = 0x00
+                val = bool(func.memory_space_enable) << 15
+                val |= bool(func.pcie_cap.ido_completion_enable) << 14
+                val |= bool(func.parity_error_response_enable) << 13
+                val |= bool(func.serr_enable) << 12
+                val |= bool(func.pcie_cap.fatal_error_reporting_enable) << 11
+                val |= bool(func.pcie_cap.non_fatal_error_reporting_enable) << 10
+                val |= bool(func.pcie_cap.correctable_error_reporting_enable) << 9
+                val |= bool(func.pcie_cap.unsupported_request_reporting_enable) << 8
+                val |= bool(func.bus_master_enable) << 7
+                val |= bool(func.pcie_cap.extended_tag_field_enable) << 6
+                val |= (func.pcie_cap.max_read_request_size & 0x7) << 3
+                val |= func.pcie_cap.max_payload_size & 0x7
+                self.device.tl_cfg_ctl.value = val
+                await clock_edge_event
+
+                self.device.tl_cfg_add.value = 0x01
+                val = bool(func.pcie_cap.ido_request_enable) << 15
+                val |= bool(func.pcie_cap.enable_no_snoop) << 14
+                val |= bool(func.pcie_cap.enable_relaxed_ordering) << 13
+                val |= (func.pcie_id.device & 0x1f) << 8
+                val |= func.pcie_id.bus & 0xff
+                self.device.tl_cfg_ctl.value = val
+                await clock_edge_event
+
+                self.device.tl_cfg_add.value = 0x02
+                val = bool(func.pm_cap.no_soft_reset) << 15
+                val |= bool(func.pcie_cap.read_completion_boundary) << 14
+                val |= bool(func.interrupt_disable) << 13
+                val |= (func.pcie_cap.interrupt_message_number & 0x1f) << 8
+                val |= bool(func.pcie_cap.power_controller_control) << 4
+                val |= (func.pcie_cap.attention_indicator_control & 0x3) << 2
+                val |= func.pcie_cap.power_indicator_control & 0x3
+                self.device.tl_cfg_ctl.value = val
+                await clock_edge_event
+
+                self.device.tl_cfg_add.value = 0x03
+                self.device.tl_cfg_ctl.value = 0
+                await clock_edge_event
+
+                self.device.tl_cfg_add.value = 0x04
+                val = bool(func.pcie_cap.atomic_op_egress_blocking) << 14
+                val |= bool(func.pcie_cap.ari_forwarding_enable) << 7
+                val |= bool(func.pcie_cap.atomic_op_requester_enable) << 6
+                self.device.tl_cfg_ctl.value = val
+                await clock_edge_event
+
+                self.device.tl_cfg_add.value = 0x05
+                val = (func.pcie_cap.current_link_speed & 0xf) << 12
+                self.device.tl_cfg_ctl.value = val
+                await clock_edge_event
+
+                self.device.tl_cfg_add.value = 0x06
+                self.device.tl_cfg_ctl.value = func.msi_cap.msi_message_address & 0xffff
+                await clock_edge_event
+
+                self.device.tl_cfg_add.value = 0x07
+                self.device.tl_cfg_ctl.value = (func.msi_cap.msi_message_address >> 16) & 0xffff
+                await clock_edge_event
+
+                self.device.tl_cfg_add.value = 0x08
+                self.device.tl_cfg_ctl.value = (func.msi_cap.msi_message_address >> 32) & 0xffff
+                await clock_edge_event
+
+                self.device.tl_cfg_add.value = 0x09
+                self.device.tl_cfg_ctl.value = (func.msi_cap.msi_message_address >> 48) & 0xffff
+                await clock_edge_event
+
+                self.device.tl_cfg_add.value = 0x0A
+                self.device.tl_cfg_ctl.value = func.msi_cap.msi_mask_bits & 0xffff
+                await clock_edge_event
+
+                self.device.tl_cfg_add.value = 0x0B
+                self.device.tl_cfg_ctl.value = (func.msi_cap.msi_mask_bits >> 16) & 0xffff
+                await clock_edge_event
+
+                self.device.tl_cfg_add.value = 0x0C
+                val = bool(func.pcie_cap.system_error_on_fatal_error_enable) << 15
+                val |= bool(func.pcie_cap.system_error_on_non_fatal_error_enable) << 14
+                val |= bool(func.pcie_cap.system_error_on_correctable_error_enable) << 13
+                val |= (func.aer_ext_cap.advanced_error_interrupt_message_number & 0x1f) << 8
+                val |= bool(func.msi_cap.msi_extended_message_data_enable) << 7
+                val |= bool(func.msix_cap.msix_function_mask) << 6
+                val |= bool(func.msix_cap.msix_enable) << 5
+                val |= (func.msi_cap.msi_multiple_message_enable & 0x7) << 2
+                val |= bool(func.msi_cap.msi_64bit_address_capable) << 1
+                val |= bool(func.msi_cap.msi_enable)
+                self.device.tl_cfg_ctl.value = val
+                await clock_edge_event
+
+                self.device.tl_cfg_add.value = 0x0D
+                self.device.tl_cfg_ctl.value = func.msi_cap.msi_message_data & 0xffff
+                await clock_edge_event
+
+                self.device.tl_cfg_add.value = 0x0E
+                val = await func.aer_ext_cap.read_register(2)
+                self.device.tl_cfg_ctl.value = val & 0xffff
+                await clock_edge_event
+
+                self.device.tl_cfg_add.value = 0x0F
+                self.device.tl_cfg_ctl.value = (val >> 16) & 0xffff
+                await clock_edge_event
+
+                self.device.tl_cfg_add.value = 0x10
+                val = await func.aer_ext_cap.read_register(5)
+                self.device.tl_cfg_ctl.value = val & 0xffff
+                await clock_edge_event
+
+                self.device.tl_cfg_add.value = 0x11
+                self.device.tl_cfg_ctl.value = (val >> 16) & 0xffff
+                await clock_edge_event
+
+                self.device.tl_cfg_add.value = 0x12
+                val = await func.aer_ext_cap.read_register(3)
+                self.device.tl_cfg_ctl.value = val & 0xffff
+                await clock_edge_event
+
+                self.device.tl_cfg_add.value = 0x13
+                self.device.tl_cfg_ctl.value = (val >> 16) & 0xffff
+                await clock_edge_event
+
+                self.device.tl_cfg_add.value = 0x14
+                self.device.tl_cfg_ctl.value = 0
+                await clock_edge_event
+
+                self.device.tl_cfg_add.value = 0x15
+                self.device.tl_cfg_ctl.value = 0
+                await clock_edge_event
+
+                self.device.tl_cfg_add.value = 0x16
+                self.device.tl_cfg_ctl.value = 0
+                await clock_edge_event
+
+                self.device.tl_cfg_add.value = 0x17
+                self.device.tl_cfg_ctl.value = 0
+                await clock_edge_event
+
+                self.device.tl_cfg_add.value = 0x18
+                self.device.tl_cfg_ctl.value = 0
+                await clock_edge_event
+
+                self.device.tl_cfg_add.value = 0x19
+                self.device.tl_cfg_ctl.value = 0
+                await clock_edge_event
+
+                self.device.tl_cfg_add.value = 0x1A
+                self.device.tl_cfg_ctl.value = 0
+                await clock_edge_event
+
+                self.device.tl_cfg_add.value = 0x1B
+                self.device.tl_cfg_ctl.value = 0
+                await clock_edge_event
+
+                self.device.tl_cfg_add.value = 0x1C
+                val = func.pcie_cap.negotiated_link_width & 0x3f
+                self.device.tl_cfg_ctl.value = val
+                await clock_edge_event
+
+                self.device.tl_cfg_add.value = 0x1D
+                self.device.tl_cfg_ctl.value = (func.msi_cap.msi_message_data >> 16) & 0xffff
+                await clock_edge_event
+
+                self.device.tl_cfg_add.value = 0x1E
+                self.device.tl_cfg_ctl.value = 0
+                await clock_edge_event
+
+                self.device.tl_cfg_add.value = 0x1F
+                self.device.tl_cfg_ctl.value = 0
+                await clock_edge_event
+
 class HandleIndex:
     def __init__(self, handle, index):
         self.handle = handle
@@ -1356,6 +1412,7 @@ class FlowControlHandler:
         self.fc_channel_state = fc_channel_state
         self.tx_bus = tx_bus
         self.rx_bus = rx_bus
+        self._run_cr = None
 
         # self.ph_sink = FlowControlSinkHandlerForHeader(
         #     clk, tx_bus.hcrdt_update[0], CocotbSignalView([tx_bus.hcrdt_update_cnt[0], tx_bus.hcrdt_update_cnt[1]]), tx_bus.hcrdt_init[0], tx_bus.hcrdt_init_ack[0], fc_channel_state, FcType.P)
@@ -1414,6 +1471,7 @@ class FlowControlHandler:
             clk, rx_bus, "dcrdt", 2, 4, FlowControlSourceHandlerForData, self, FcType.CPL)
 
         self.source_credit_update_event = Event()
+        self._run_cr = cocotb.start_soon(self._run())
 
     @staticmethod
     def _make_signal_view(signal, start, width):
@@ -1436,12 +1494,36 @@ class FlowControlHandler:
             HandleIndex(getattr(bus, f"{prefix}_init"), index),
             HandleIndex(getattr(bus, f"{prefix}_init_ack"), index),
             parent,
-            fc_type
+            fc_type,
         )
 
 
     def source_credit_update_callback(self):
         self.source_credit_update_event.set()
+
+    def stop(self):
+        # TODO: Repeated reset is not fully supported yet.  Flow-control state
+        # teardown/restart across multiple reset cycles has not been fully
+        # validated and likely needs additional cleanup before reuse.
+        if self._run_cr is not None:
+            self._run_cr.kill()
+            self._run_cr = None
+
+        for handler in (
+            self.ph_sink,
+            self.nph_sink,
+            self.cplh_sink,
+            self.pd_sink,
+            self.npd_sink,
+            self.cpld_sink,
+            self.ph_source,
+            self.nph_source,
+            self.cplh_source,
+            self.pd_source,
+            self.npd_source,
+            self.cpld_source,
+        ):
+            handler.stop()
 
     def rx_source_has_enough_credits(self, tlp):
         data_credits_consumed = tlp.get_data_credits()
@@ -1495,6 +1577,9 @@ class FlowControlHandler:
             self.cpld_sink.release_credit(data_credits_consumed)
 
     async def run(self):
+        await self._run_cr
+
+    async def _run(self):
         # first, wait for the RTile to communicate with PCIe link partener, and get the Credit from link partener
         await self.fc_channel_state.initialized.wait()
 
@@ -1520,7 +1605,7 @@ class FlowControlSourceHandlerForData:
                  crdt_init,
                  crdt_init_ack,
                  parent_fc_handler,
-                 fc_type
+                 fc_type,
                  ):
 
         self.__dict__.setdefault('_base_field_size', 16)
@@ -1543,8 +1628,17 @@ class FlowControlSourceHandlerForData:
 
         self.parent_fc_handler = parent_fc_handler
         self.fc_type = fc_type
+        self._run_cr = None
 
-        cocotb.start_soon(self._run())
+        self._run_cr = cocotb.start_soon(self._run())
+
+    def stop(self):
+        if self._run_cr is not None:
+            self._run_cr.kill()
+            self._run_cr = None
+        self.init_val = 0
+        self.available_val = 0
+        self.crdt_init_ack.value = 0
 
     def get_available_val(self):
         return self.available_val
@@ -1601,7 +1695,7 @@ class FlowControlSinkHandlerForData:
                  crdt_init,
                  crdt_init_ack,
                  fc_channel_state,
-                 fc_type
+                 fc_type,
                  ):
 
         self.__dict__.setdefault('_base_field_size', 16)
@@ -1628,8 +1722,8 @@ class FlowControlSinkHandlerForData:
         self.fc_type = fc_type
 
         self.initialized = Event()
-
-        cocotb.start_soon(self._run())
+        self._run_cr = None
+        self._run_cr = cocotb.start_soon(self._run())
 
     def set_init_value(self, value):
         self.init_val = value
@@ -1637,7 +1731,20 @@ class FlowControlSinkHandlerForData:
         self.initialized.set()
 
     def release_credit(self, credit):
+        if self.credit_to_release is None:
+            self.credit_to_release = 0
         self.credit_to_release += credit
+
+    def stop(self):
+        if self._run_cr is not None:
+            self._run_cr.kill()
+            self._run_cr = None
+        self.init_val = None
+        self.credit_to_release = None
+        self.initialized.clear()
+        self.crdt_update.setimmediatevalue(0)
+        self.crdt_update_cnt.setimmediatevalue(0)
+        self.crdt_init.setimmediatevalue(0)
 
     async def _run(self):
         max_credit_release_per_beat = 2**(len(self.crdt_update_cnt)) - 1
